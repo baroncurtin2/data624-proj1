@@ -1,0 +1,95 @@
+---
+title: "Data 624 - Project 1"
+author: "Baron Curtin"
+date: "`r Sys.Date()`"
+output:
+  prettydoc::html_pretty:
+    toc: true
+    theme: cayman
+    highlight: github
+    df_print: paged
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(tidy = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+libs <- c("tidyverse", "knitr", "kableExtra", "fpp2", "forecast", "imputeTS", "readxl", "xlsx", "glue", "gridExtra")
+loadPkg <- function(x) {
+  if(!require(x, character.only = T)) install.packages(x, dependencies = T, repos = "http://cran.us.r-project.org")
+  require(x, character.only = T)
+}
+lapply(libs, loadPkg)
+```
+
+```{r, include=FALSE}
+# data import S01, S03 (No V02), S04
+csvs <- c("S01.csv", "S03.csv", "S04.csv")
+datasets <- csvs %>%
+  map(function(x) {
+    data <- read_csv(x) %>%
+      # coerce SeriesInd into dates
+      mutate(SeriesInd = as.Date(SeriesInd, origin ="1899-12-30"))
+    
+    # split into main and forecast sets
+    main <- data %>% slice(1:(n()-140))
+    fc <- data %>% slice((n()-140 + 1):n())
+    
+    return(list(main = main, fc = fc))
+  }) %>%
+  setNames(csvs)
+```
+
+## Exploratory Analysis
+```{r}
+datasets %>% iwalk(function(datalist, csv) {
+  print(csv)
+  print(summary(datalist$main))
+  #print(summary(datalist$fc))
+})
+```
+
+Using the summary function:
+* S01 has 2 total NAs in Var01
+* S03 has 8 total NAs, 4 in each of Var05 and Var07
+* S04 has 2 total NAs in Var02
+* We will have to impute these NAs prior to forecasting
+
+### Plots
+```{r, include=FALSE}
+grpVars <- list(
+  S01.csv = c("Var01", "Var02"),
+  S03.csv = c("Var05", "Var07"),
+  S04.csv = c("Var01", "Var02")
+)
+
+# function to generate plots
+genPlots <- function(data, x, y, title) {
+  # generate plot
+  g <- ggplot(data, aes_(as.name(x), as.name(y))) +
+    geom_line() +
+    ggtitle(title)
+  
+  print(g)
+}
+```
+
+S01
+```{r}
+csv <- "S01.csv"
+data <- datasets[[csv]][["main"]]
+
+grid.arrange(genPlots(data, "SeriesInd", grpVars[[csv]][[1]], csv), 
+             genPlots(data, "SeriesInd", grpVars[[csv]][[2]], csv),
+             ncol = 2)
+```
+
+The plots reveal:
+* Var02 contain a really large outlier
+* This will have to be dealt with prior to forecasting
+
+
+
+
+
+
