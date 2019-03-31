@@ -14,7 +14,7 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 knitr::opts_chunk$set(tidy = TRUE)
 knitr::opts_chunk$set(warning = FALSE)
-libs <- c("tidyverse", "knitr", "kableExtra", "fpp2", "forecast", "imputeTS", "readxl", "xlsx", "glue", "gridExtra")
+libs <- c("tidyverse", "knitr", "kableExtra", "fpp2", "forecast", "imputeTS", "xts", "readxl", "xlsx", "glue", "gridExtra", "lubridate")
 loadPkg <- function(x) {
   if(!require(x, character.only = T)) install.packages(x, dependencies = T, repos = "http://cran.us.r-project.org")
   require(x, character.only = T)
@@ -25,27 +25,25 @@ lapply(libs, loadPkg)
 ```{r, include=FALSE}
 # data import S01, S03 (No V02), S04
 csvs <- c("S01.csv", "S03.csv", "S04.csv")
+grpVars <- c("Var01", "Var02", "Var05", "Var07")
+
 datasets <- csvs %>%
-  map(function(x) {
-    data <- read_csv(x) %>%
-      # coerce SeriesInd into dates
-      mutate(SeriesInd = as.Date(SeriesInd, origin ="1899-12-30"))
-    
-    # split into main and forecast sets
-    main <- data %>% slice(1:(n()-140))
-    fc <- data %>% slice((n()-140 + 1):n())
-    
-    return(list(main = main, fc = fc))
+  map(function(csv) {
+    data <- read_csv(csv) %>%
+      mutate(SeriesInd = as.Date(SeriesInd, origin ="1899-12-30"),
+             LubDate = ymd(SeriesInd),
+             DayOfWeek = wday(LubDate, label = T)) %>%
+      slice(1:(n() - 140)) %>%
+      select(-group)
   }) %>%
   setNames(csvs)
 ```
 
 ## Exploratory Analysis
 ```{r}
-datasets %>% iwalk(function(datalist, csv) {
+datasets %>% iwalk(function(data, csv) {
   print(csv)
-  print(summary(datalist$main))
-  #print(summary(datalist$fc))
+  print(summary(data))
 })
 ```
 
@@ -53,16 +51,11 @@ Using the summary function:
 * S01 has 2 total NAs in Var01
 * S03 has 8 total NAs, 4 in each of Var05 and Var07
 * S04 has 2 total NAs in Var02
+* There are no Wednesdays or Thurdays in the dataset
 * We will have to impute these NAs prior to forecasting
 
 ### Plots
 ```{r, include=FALSE}
-grpVars <- list(
-  S01.csv = c("Var01", "Var02"),
-  S03.csv = c("Var05", "Var07"),
-  S04.csv = c("Var01", "Var02")
-)
-
 # function to generate plots
 genPlots <- function(data, x, y, title) {
   # generate plot
@@ -70,26 +63,220 @@ genPlots <- function(data, x, y, title) {
     geom_line() +
     ggtitle(title)
   
-  print(g)
+  return(g)
 }
+
+genBoxPlots <- function(data, var) {
+  # reformat data for easy plotting
+  data <- data %>%
+    select(SeriesInd, DayOfWeek, var) %>%
+    gather("var", "amount", -SeriesInd, -DayOfWeek)
+  
+  # generate plot
+  g <- ggplot(data, aes_(as.name("var"), as.name("amount"))) +
+    geom_boxplot()
+  return(g)
+}
+
+arrangePlots <- function(p1, p2, rows = 2) {
+  grid.arrange(p1, p2, nrow = rows)
+}
+
+x <- "SeriesInd"
 ```
 
 S01
 ```{r}
-csv <- "S01.csv"
-data <- datasets[[csv]][["main"]]
+g <- "S01.csv"
 
-grid.arrange(genPlots(data, "SeriesInd", grpVars[[csv]][[1]], csv), 
-             genPlots(data, "SeriesInd", grpVars[[csv]][[2]], csv),
-             ncol = 2)
+plots <- c('Var01', 'Var02') %>%
+  map(~ genPlots(datasets[[g]], "SeriesInd", .x, g))
+
+arrangePlots(plots[[1]], plots[[2]])
 ```
 
 The plots reveal:
-* Var02 contain a really large outlier
+* Var02 contains a really large outlier
 * This will have to be dealt with prior to forecasting
 
 
+```{r}
+plots <- c('Var01', 'Var02') %>%
+  map(~ genBoxPlots(datasets[[g]], .x))
+
+arrangePlots(plots[[1]], plots[[2]], 1)
+```
+
+The boxplots reveal:
+* Var02 contains a good amount of outliers
+* This will have to be dealt with prior to forecasting
+
+
+S03
+```{r}
+g <- "S03.csv"
+
+plots <- c('Var05', 'Var07') %>%
+  map(~ genPlots(datasets[[g]], "SeriesInd", .x, g))
+
+arrangePlots(plots[[1]], plots[[2]])
+```
+
+The plots reveal:
+* Var05 and Var07 are relatively similar
+
+
+```{r}
+plots <- c('Var05', 'Var07') %>%
+  map(~ genBoxPlots(datasets[[g]], .x))
+
+arrangePlots(plots[[1]], plots[[2]], 1)
+```
+
+
+S04
+```{r}
+g <- "S04.csv"
+
+plots <- c('Var01', 'Var02') %>%
+  map(~ genPlots(datasets[[g]], "SeriesInd", .x, g))
+
+arrangePlots(plots[[1]], plots[[2]])
+```
+
+The plots reveal:
+* Var02 contains a really large outlier
+* This will have to be dealt with prior to forecasting
+
+
+```{r}
+plots <- c('Var01', 'Var02') %>%
+  map(~ genBoxPlots(datasets[[g]], .x))
+
+arrangePlots(plots[[1]], plots[[2]], 1)
+```
+
+
+## Data Preprocessing
+```{r, results='hide'}
+# identify and remove outliers
+identifyOutliers <- function(data, var) {
+  if(var %in% colnames(data)) {
+    outliers <- boxplot(data[var])$out
+    return(outliers)
+  }
+}
+
+replaceOutliers <- function(data, var, outliers) {
+  if(var %in% colnames(data)) {
+    data[which(data[var] %in% outliers), var] <- NA
+    return(data)
+  }
+}
+
+processedData <- datasets %>%
+  map(function(data) {
+    df <- data
+    
+    for (var in grpVars) {
+      if(var %in% colnames(df)) {
+        outliers <- identifyOutliers(df, var)
+        df <- replaceOutliers(df, var, outliers)
+      }
+    }
+    return(df)
+  })
+```
 
 
 
+```{r}
+# impute missing values
+imputeNa <- function(data, var) {
+  if(var %in% colnames(data)) {
+    imp <- na.kalman(data[[var]], model = "auto.arima")
+    return(imp)
+  }
+}
+
+processedData <- processedData %>%
+  map(function(data) {
+    for (var in grpVars) {
+      if (var %in% colnames(data)) {
+        data[[var]] <- imputeNa(data, var)
+      }
+    } 
+    return(data)
+  })
+```
+
+
+Create the Timeseries Objects
+```{r}
+# create timeseries
+createTs <- function(data, var) {
+  if(var %in% colnames(data)) {
+    timeSer <- xts(data[[var]], order.by = data[["SeriesInd"]])
+    return(timeSer)
+  }
+}
+
+timeSeries_ <- processedData %>%
+  map(function(data) {
+    vs <- grpVars[grpVars %in% colnames(data)]
+    tsList <- vs %>%
+      map(function(var) {
+        if (var %in% colnames(data)) {
+          myTs <- xts(data[[var]], order.by = data[["SeriesInd"]])
+          return(myTs)
+        }
+      })
+    return(tsList)
+  })
+```
+
+
+Box-Cox Transform
+```{r}
+bxcxTransform <- function(data) {
+  lmda <- BoxCox.lambda(data)
+  data <- BoxCox(data, lmda)
+  return(data)
+}
+
+timeSeries_ <- timeSeries_ %>%
+  map(function(tsList) {
+    tsList <- tsList %>%
+      map(~ bxcxTransform(.x))
+    return(tsList)
+  })
+```
+
+
+### Modelling
+```{r}
+models <- timeSeries_ %>%
+  map(function(tsList) {
+    tsList <- tsList %>%
+      map(~ auto.arima(.x, stepwise=FALSE, approximation=FALSE))
+  })
+
+```
+
+
+### Forecasting
+```{r}
+forecasts <- models %>%
+  map(function(modelList) {
+    modelList <- modelList %>%
+      map(function(model) {
+        results <- list(
+          checkResiduals = checkresiduals(model),
+          forecast = forecast(model, h = 140)
+        )
+        return(results)
+      })
+    return(modelList)
+  })
+```
 
