@@ -1,0 +1,134 @@
+---
+title: "Data 624 - Project 1"
+author: "Baron Curtin"
+date: "`r Sys.Date()`"
+output:
+  prettydoc::html_pretty:
+    toc: true
+    theme: cayman
+    highlight: github
+    df_print: paged
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(tidy = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+libs <- c("tidyverse", "knitr", "kableExtra", "fpp2", "forecast", "imputeTS", "tsoutliers", "xts", "readxl", "xlsx", "glue", "gridExtra", "lubridate")
+loadPkg <- function(x) {
+  if(!require(x, character.only = T)) install.packages(x, dependencies = T, repos = "http://cran.us.r-project.org")
+  require(x, character.only = T)
+}
+lapply(libs, loadPkg)
+```
+
+```{r, include=FALSE}
+# data import S01, S03 (No V02), S04
+csvs <- list("S01.csv" = list("Var01", "Var02"),
+              "S02.csv" = list("Var02", "Var03"),
+              "S03.csv" = list("Var05", "Var07"),
+              "S04.csv" = list("Var01", "Var02"),
+              "S05.csv" = list("Var02", "Var03"),
+              "S06.csv" = list("Var05", "Var07"))
+
+datasets <- csvs %>%
+  imap(function(variables, csv) {
+    allData <- read_csv(csv)
+    
+    # create subsetted data list
+    dataList <- variables %>%
+      map(function(v) {
+        data <- allData %>%
+          select(SeriesInd, v) %>%
+          mutate(Dates = as.Date(SeriesInd, origin ="1899-12-30")) %>%
+          # complete the missing dates
+          complete(Dates = seq.Date(min(Dates), max(Dates), by="day")) %>%
+          # remove dummy forecast
+          slice(1:(n() - 140))
+      }) %>%
+      setNames(variables)
+    return(dataList)
+  })
+```
+
+## Data Preprocessing
+
+Create the Timeseries Objects
+```{r}
+# create timeseries
+timeSeries <- datasets %>%
+  map(function(dataList) {
+    dataList %>%
+      imap(function(df, vbl) {
+        ts_ <- xts(df[vbl], order.by = df$Dates)
+        return(ts_)
+      })
+  })
+```
+
+Diff Transform
+```{r}
+# apply diff to all datasets
+processedData <- timeSeries %>%
+  map(function(dataList) {
+    dataList %>%
+      map(~ diff(.x))
+  })
+```
+
+Outlier Removal
+```{r, results='hide'}
+# impute missing values, replace outliers, and BoxCox tranformation
+processedData <- processedData %>%
+  map(function(dataList) {
+    dataList %>%
+      map(function(data) {
+        data <- tsclean(data, replace.missing = T, lambda = "auto")
+        data <- xts(data, order.by = datasets[["S01.csv"]][["Var01"]][["Dates"]])
+      })
+  })
+```
+
+### Modelling
+```{r}
+models <- processedData %>%
+  map(function(tsList) {
+    tsList <- tsList %>%
+      map(~ auto.arima(.x, stepwise=FALSE, approximation=FALSE, biasadj = T))
+  })
+
+```
+
+
+### Forecasting
+```{r}
+forecasts <- models %>%
+  map(function(modelList) {
+    modelList <- modelList %>%
+      map(function(model) {
+        results <- list(
+          checkResiduals = checkresiduals(model),
+          forecast = forecast(model, h = 140)
+        )
+        return(results)
+      })
+    return(modelList)
+  })
+```
+
+## Export Forecasts to CSV
+```{r}
+forecasts %>%
+  iwalk(function(fcList, set) {
+    # remove .csv to avoid confusion in naming
+    set <- str_replace(set, ".csv", "")
+    
+    fcList %>%
+      iwalk(function(fc, vbl){
+        fc <- as.data.frame(fc[["forecast"]]["mean"])
+        tmp <- tempfile(pattern = glue("{set}-{vbl}.csv"), tmpdir = "./forecasts", fileext = ".csv")
+        write.zoo(fc, sep=",", file = tmp, index.name = "SeriesInd")
+      })
+  })
+```
+
